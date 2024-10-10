@@ -1,11 +1,4 @@
 streamlit
-imaplib
-email
-html2text
-base64
-quopri
-logging
-IMAPClient
-imapclient
-io
 chardet
+requests
+beautifulsoup4
