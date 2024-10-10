@@ -25,7 +25,6 @@ logger.addHandler(stream_handler)
 # Dane logowania do skrzynek (w praktyce lepiej przechowywać je bezpiecznie)
 accounts = [
     {"email": "otwieraczmaili@wp.pl", "password": "Ku6hCTgMvwtnq8w", "imap_server": "imap.wp.pl"},
-    {"email": "otwieraczmaili10@wp.pl", "password": "Ku6hCTgMvwtnq8w", "imap_server": "imap.wp.pl"},
     # Dodaj więcej kont według potrzeb
 ]
 
@@ -169,26 +168,30 @@ def fetch_email_by_subject(account, subject):
     logger.debug("No matching email found")
     return None, None
 
-st.title("Multi-account Email Viewer")
+def main():
+    st.title("Multi-account Email Viewer")
 
-subject_to_search = st.text_input("Enter email subject to search for:")
+    subject_to_search = st.text_input("Enter email subject to search for:")
 
-if st.button("Search Emails"):
-    for account in accounts:
-        st.subheader(f"Searching in {account['email']}")
-        subject, content = fetch_email_by_subject(account, subject_to_search)
-        if subject:
-            st.write(f"Subject: {subject}")
-            st.components.v1.html(content, height=600, scrolling=True)
-            st.success("Email has been marked as read and open has been simulated.")
-        else:
-            st.write("No email found with the given subject.")
-        st.markdown("---")
+    if st.button("Search Emails"):
+        for account in accounts:
+            st.subheader(f"Searching in {account['email']}")
+            subject, content = fetch_email_by_subject(account, subject_to_search)
+            if subject:
+                st.write(f"Subject: {subject}")
+                st.components.v1.html(content, height=600, scrolling=True)
+                st.success("Email has been marked as read and open has been simulated.")
+            else:
+                st.write("No email found with the given subject.")
+            st.markdown("---")
 
-# Wyświetlanie logów debugowania
-if st.checkbox("Show debug logs"):
-    log_contents = log_buffer.getvalue()
-    st.text_area("Debug Logs", log_contents, height=300)
-    if st.button("Clear logs"):
-        log_buffer.truncate(0)
-        log_buffer.seek(0)
+    # Wyświetlanie logów debugowania
+    if st.checkbox("Show debug logs"):
+        log_contents = log_buffer.getvalue()
+        st.text_area("Debug Logs", log_contents, height=300)
+        if st.button("Clear logs"):
+            log_buffer.truncate(0)
+            log_buffer.seek(0)
+
+if __name__ == "__main__":
+    main()
