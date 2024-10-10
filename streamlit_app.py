@@ -25,6 +25,7 @@ logger.addHandler(stream_handler)
 # Dane logowania do skrzynek (w praktyce lepiej przechowywać je bezpiecznie)
 accounts = [
     {"email": "otwieraczmaili@wp.pl", "password": "Ku6hCTgMvwtnq8w", "imap_server": "imap.wp.pl"},
+    {"email": "otwieraczmaili10@wp.pl", "password": "Ku6hCTgMvwtnq8w", "imap_server": "imap.wp.pl"},
     # Dodaj więcej kont według potrzeb
 ]
 
