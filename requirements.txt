@@ -7,3 +7,5 @@ quopri
 logging
 IMAPClient
 imapclient
+io
+chardet
