@@ -22,7 +22,7 @@ stream_handler = logging.StreamHandler(log_buffer)
 stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(stream_handler)
 
-# Dane logowania do skrzynek (w praktyce lepiej przechowywać je bezpiecznie)
+# Dane logowania do skrzynek 
 accounts = [
     {"email": "otwieraczmaili@wp.pl", "password": "Ku6hCTgMvwtnq8w", "imap_server": "imap.wp.pl"},
     {"email": "otwieraczmaili10@wp.pl", "password": "Ku6hCTgMvwtnq8w", "imap_server": "imap.wp.pl"},
