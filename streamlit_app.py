@@ -26,7 +26,6 @@ logger.addHandler(stream_handler)
 accounts = [
     {"email": "otwieraczmaili@wp.pl", "password": "Ku6hCTgMvwtnq8w", "imap_server": "imap.wp.pl"},
     {"email": "otwieraczmaili10@wp.pl", "password": "Ku6hCTgMvwtnq8w", "imap_server": "imap.wp.pl"},
-    # Dodaj więcej kont według potrzeb
 ]
 
 def decode_content(part):
