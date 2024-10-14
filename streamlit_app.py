@@ -170,9 +170,9 @@ def fetch_email_by_subject(account, subject):
     return None, None
 
 def main():
-    st.title("Multi-account Email Viewer")
+    st.title("Otwieracz do maili")
 
-    subject_to_search = st.text_input("Enter email subject to search for:")
+    subject_to_search = st.text_input("Podaj temat maila")
 
     if st.button("Search Emails"):
         for account in accounts:
@@ -181,9 +181,9 @@ def main():
             if subject:
                 st.write(f"Subject: {subject}")
                 st.components.v1.html(content, height=600, scrolling=True)
-                st.success("Email has been marked as read and open has been simulated.")
+                st.success("Email otwarty i kliknięty")
             else:
-                st.write("No email found with the given subject.")
+                st.write("Brak wiadomości o takim temacie")
             st.markdown("---")
 
     # Wyświetlanie logów debugowania
