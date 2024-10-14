@@ -174,9 +174,9 @@ def main():
 
     subject_to_search = st.text_input("Podaj temat maila")
 
-    if st.button("Search Emails"):
+    if st.button("Szukaj wiadomości"):
         for account in accounts:
-            st.subheader(f"Searching in {account['email']}")
+            st.subheader(f"Szukam w {account['email']}")
             subject, content = fetch_email_by_subject(account, subject_to_search)
             if subject:
                 st.write(f"Subject: {subject}")
