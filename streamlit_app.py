@@ -3,14 +3,14 @@ import imaplib
 import email
 from email.header import decode_header
 import base64
-import re
-import quopri
 import logging
 from io import StringIO
 import chardet
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+import time
+import random
 
 # Konfiguracja logowania
 logging.basicConfig(level=logging.DEBUG)
@@ -22,11 +22,11 @@ stream_handler = logging.StreamHandler(log_buffer)
 stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(stream_handler)
 
-# Dane logowania do skrzynek 
-accounts = [
-    {"email": "otwieraczmaili@wp.pl", "password": "Ku6hCTgMvwtnq8w", "imap_server": "imap.wp.pl"},
-    {"email": "otwieraczmaili10@wp.pl", "password": "Ku6hCTgMvwtnq8w", "imap_server": "imap.wp.pl"},
-]
+# Pobieranie danych logowania z sekretów Streamlit Cloud
+EMAIL_ACCOUNT = st.secrets["EMAIL_USERNAME"]
+EMAIL_PASSWORD = st.secrets["EMAIL_PASSWORD"]
+IMAP_SERVER = st.secrets["IMAP_SERVER"]
+IMAP_PORT = int(st.secrets["IMAP_PORT"])
 
 def decode_content(part):
     content = part.get_payload(decode=True)
@@ -98,98 +98,213 @@ def process_html_content(html_content, email_message):
     
     return str(soup)
 
-def mark_as_read(mail, email_id):
-    mail.store(email_id, '+FLAGS', '\\Seen')
-    logger.debug(f"Marked email {email_id} as read")
+def delete_email(mail, email_id):
+    try:
+        mail.store(email_id, '+FLAGS', '\\Deleted')
+        mail.expunge()
+        logger.debug(f"Deleted email {email_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting email {email_id}: {e}")
+        return False
 
-def fetch_email_by_subject(account, subject):
-    logger.debug(f"Attempting to fetch email with subject: {subject}")
-    mail = imaplib.IMAP4_SSL(account["imap_server"])
-    mail.login(account["email"], account["password"])
-    mail.select("inbox")
-    
-    # Lista metod wyszukiwania
-    search_methods = [
-        lambda: mail.search(None, f'SUBJECT "{subject}"'),
-        lambda: mail.search(None, f'SUBJECT "{subject.encode("utf-8").decode("latin-1")}"'),
-        lambda: mail.uid('SEARCH', 'CHARSET', 'UTF-8', 'SUBJECT', subject),
-        lambda: mail.search(None, 'ALL')
-    ]
-    
-    email_ids = []
-    for i, search_method in enumerate(search_methods):
-        try:
-            logger.debug(f"Trying search method {i+1}")
-            _, search_data = search_method()
-            email_ids = search_data[0].split()
-            logger.debug(f"Search method {i+1} result: {email_ids}")
-            if email_ids:
-                break
-        except Exception as e:
-            logger.error(f"Error in search method {i+1}: {e}")
-    
-    if email_ids:
-        for email_id in reversed(email_ids):  # Sprawdzamy od najnowszych
-            try:
-                _, msg_data = mail.fetch(email_id, '(RFC822)')
-                email_body = msg_data[0][1]
-                email_message = email.message_from_bytes(email_body)
+def count_emails_by_subject(subject):
+    try:
+        mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
+        mail.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
+        mail.select("inbox")
+        
+        _, search_data = mail.search(None, f'SUBJECT "{subject}"')
+        email_ids = search_data[0].split()
+        
+        mail.close()
+        mail.logout()
+        
+        return len(email_ids)
+    except Exception as e:
+        logger.error(f"Error counting emails: {e}")
+        return 0
+
+def process_email(email_id, mail):
+    try:
+        _, msg_data = mail.fetch(email_id, '(RFC822)')
+        email_body = msg_data[0][1]
+        email_message = email.message_from_bytes(email_body)
+        
+        subject = decode_header(email_message["Subject"])[0][0]
+        if isinstance(subject, bytes):
+            subject = subject.decode('utf-8', errors='replace')
+        
+        logger.debug(f"Processing email with subject: {subject}")
+        
+        content = ""
+        html_content = ""
+        
+        for part in email_message.walk():
+            if part.get_content_type() == "text/plain":
+                content += decode_content(part)
+            elif part.get_content_type() == "text/html":
+                html_content += decode_content(part)
+        
+        final_content = process_html_content(html_content, email_message) if html_content else content
+        
+        # Usuń wiadomość po przetworzeniu
+        delete_success = delete_email(mail, email_id)
+        
+        if delete_success:
+            logger.debug(f"Email processed and deleted successfully")
+        else:
+            logger.warning(f"Email processed but deletion failed")
+            
+        return subject, final_content, delete_success
+    except Exception as e:
+        logger.error(f"Error processing email: {e}")
+        return None, None, False
+
+def open_emails_by_subject(subject, count=None, interval=10):
+    try:
+        mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
+        mail.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
+        mail.select("inbox")
+        
+        _, search_data = mail.search(None, f'SUBJECT "{subject}"')
+        email_ids = search_data[0].split()
+        
+        if not email_ids:
+            st.warning(f"Nie znaleziono maili o temacie '{subject}'")
+            mail.close()
+            mail.logout()
+            return []
+        
+        if count and count < len(email_ids):
+            email_ids = email_ids[:count]
+        
+        processed_emails = []
+        processed_count = 0
+        error_count = 0
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, email_id in enumerate(email_ids):
+            # Aktualizacja paska postępu
+            progress = (i + 1) / len(email_ids)
+            progress_bar.progress(progress)
+            status_text.text(f"Przetwarzanie maila {i+1} z {len(email_ids)}")
+            
+            subject, content, delete_success = process_email(email_id, mail)
+            if subject and content:
+                processed_emails.append((subject, content))
+                processed_count += 1
                 
-                current_subject = decode_header(email_message["Subject"])[0][0]
-                if isinstance(current_subject, bytes):
-                    current_subject = current_subject.decode('utf-8', errors='replace')
-                
-                logger.debug(f"Checking email with subject: {current_subject}")
-                
-                if subject.lower() in current_subject.lower():
-                    content = ""
-                    html_content = ""
-                    
-                    for part in email_message.walk():
-                        if part.get_content_type() == "text/plain":
-                            content += decode_content(part)
-                        elif part.get_content_type() == "text/html":
-                            html_content += decode_content(part)
-                    
-                    final_content = process_html_content(html_content, email_message) if html_content else content
-                    
-                    # Oznacz wiadomość jako przeczytaną
-                    mark_as_read(mail, email_id)
-                    
-                    mail.close()
-                    mail.logout()
-                    logger.debug(f"Email found, processed, and marked as read successfully")
-                    return current_subject, final_content
-            except Exception as e:
-                logger.error(f"Error processing email: {e}")
-    
-    mail.close()
-    mail.logout()
-    logger.debug("No matching email found")
-    return None, None
+                # Wyświetl przetworzony email
+                with st.expander(f"Email {i+1}: {subject}", expanded=False):
+                    st.components.v1.html(content, height=400, scrolling=True)
+                    if not delete_success:
+                        st.warning("Email został otwarty, ale nie udało się go usunąć")
+            else:
+                error_count += 1
+                st.error(f"Błąd podczas przetwarzania maila {i+1}")
+            
+            # Losowa wartość interwału (±50%)
+            if i < len(email_ids) - 1:  # Nie czekaj po ostatnim mailu
+                random_interval = interval * (0.5 + random.random())
+                status_text.text(f"Czekam {random_interval:.2f}s przed kolejnym mailem...")
+                time.sleep(random_interval)
+        
+        mail.close()
+        mail.logout()
+        
+        if error_count > 0:
+            status_text.text(f"Zakończono: przetworzono {processed_count} maili, błędy: {error_count}")
+        else:
+            status_text.text(f"Zakończono przetwarzanie {processed_count} maili")
+            
+        return processed_emails
+    except Exception as e:
+        st.error(f"Wystąpił błąd podczas otwierania maili: {e}")
+        logger.error(f"Error in open_emails_by_subject: {e}")
+        return []
+
+def check_imap_connection():
+    try:
+        mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
+        mail.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
+        mail.logout()
+        return True
+    except Exception as e:
+        logger.error(f"Error connecting to IMAP server: {e}")
+        return False
 
 def main():
     st.title("Otwieracz do maili")
-
+    
+    # Sprawdź połączenie do serwera IMAP
+    connection_status = check_imap_connection()
+    
+    if not connection_status:
+        st.error(f"Nie udało się połączyć z serwerem IMAP ({IMAP_SERVER}:{IMAP_PORT}). Sprawdź ustawienia połączenia.")
+    else:
+        st.success(f"Połączono z serwerem IMAP: {EMAIL_ACCOUNT}")
+    
     subject_to_search = st.text_input("Podaj temat maila")
-
-    if st.button("Szukaj wiadomości"):
-        for account in accounts:
-            st.subheader(f"Szukam w {account['email']}")
-            subject, content = fetch_email_by_subject(account, subject_to_search)
-            if subject:
-                st.write(f"Subject: {subject}")
-                st.components.v1.html(content, height=600, scrolling=True)
-                st.success("Email otwarty i kliknięty")
+    
+    if st.button("Sprawdź liczbę maili"):
+        if not subject_to_search:
+            st.error("Podaj temat maila")
+            return
+            
+        with st.spinner("Sprawdzanie liczby maili..."):
+            email_count = count_emails_by_subject(subject_to_search)
+            
+        st.session_state['email_count'] = email_count
+        st.session_state['subject'] = subject_to_search
+        
+        if email_count > 0:
+            st.success(f"Znaleziono {email_count} maili o temacie '{subject_to_search}'")
+        else:
+            st.warning(f"Nie znaleziono maili o temacie '{subject_to_search}'")
+    
+    if 'email_count' in st.session_state and st.session_state['email_count'] > 0:
+        st.subheader("Ustawienia otwierania")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            open_all = st.radio("Które maile otworzyć?", ["Wszystkie", "Tylko część"])
+        
+        with col2:
+            if open_all == "Tylko część":
+                email_count_to_open = st.number_input("Ile maili otworzyć?", 
+                                                     min_value=1, 
+                                                     max_value=st.session_state['email_count'], 
+                                                     value=min(5, st.session_state['email_count']))
             else:
-                st.write("Brak wiadomości o takim temacie")
-            st.markdown("---")
-
+                email_count_to_open = st.session_state['email_count']
+        
+        interval = st.slider("Interwał między otwieraniem maili (sekundy)", 
+                            min_value=1, 
+                            max_value=60, 
+                            value=10,
+                            help="Faktyczny interwał będzie losowy w zakresie ±50% podanej wartości")
+        
+        if st.button("Zacznij otwierać maile"):
+            if not connection_status:
+                st.error("Nie można otworzyć maili z powodu błędu połączenia z serwerem")
+                return
+                
+            with st.spinner("Otwieranie maili..."):
+                open_emails_by_subject(
+                    st.session_state['subject'], 
+                    count=email_count_to_open if open_all == "Tylko część" else None,
+                    interval=interval
+                )
+    
     # Wyświetlanie logów debugowania
-    if st.checkbox("Show debug logs"):
+    with st.expander("Logi debugowania", expanded=False):
         log_contents = log_buffer.getvalue()
-        st.text_area("Debug Logs", log_contents, height=300)
-        if st.button("Clear logs"):
+        st.text_area("Logi", log_contents, height=300)
+        if st.button("Wyczyść logi"):
             log_buffer.truncate(0)
             log_buffer.seek(0)
 
