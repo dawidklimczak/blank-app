@@ -62,6 +62,10 @@ def simulate_link_click(url):
 def process_html_content(html_content, email_message):
     soup = BeautifulSoup(html_content, 'html.parser')
     
+    # Liczniki do śledzenia ilości przetworzonych elementów
+    processed_images = 0
+    processed_links = 0
+    
     # Przetwarzanie obrazów
     for img in soup.find_all('img'):
         src = img.get('src')
@@ -75,6 +79,7 @@ def process_html_content(html_content, email_message):
                         img_type = part.get_content_type()
                         encoded_image = base64.b64encode(img_data).decode()
                         img['src'] = f"data:{img_type};base64,{encoded_image}"
+                        processed_images += 1
                         break
             else:
                 # Obraz zewnętrzny
@@ -83,6 +88,7 @@ def process_html_content(html_content, email_message):
                 if img_data:
                     encoded_image = base64.b64encode(img_data).decode()
                     img['src'] = f"data:image/png;base64,{encoded_image}"
+                    processed_images += 1
     
     # Przetwarzanie linków
     for a in soup.find_all('a'):
@@ -90,12 +96,14 @@ def process_html_content(html_content, email_message):
         if href:
             full_url = urljoin(email_message['From'], href)
             a['href'] = simulate_link_click(full_url)
+            processed_links += 1
     
     # Dodanie stylów do body
     body = soup.find('body')
     if body:
         body['style'] = 'max-width: 800px; margin: auto; padding: 20px;'
     
+    logger.debug(f"Processed {processed_images} images and {processed_links} links")
     return str(soup)
 
 def delete_email(mail, email_id):
@@ -124,6 +132,19 @@ def count_emails_by_subject(subject):
     except Exception as e:
         logger.error(f"Error counting emails: {e}")
         return 0
+
+def get_first_email_by_subject(mail, subject):
+    """Pobiera ID pierwszego maila o danym temacie"""
+    try:
+        _, search_data = mail.search(None, f'SUBJECT "{subject}"')
+        email_ids = search_data[0].split()
+        
+        if email_ids:
+            return email_ids[0]
+        return None
+    except Exception as e:
+        logger.error(f"Error searching emails: {e}")
+        return None
 
 def process_email(email_id, mail):
     try:
@@ -167,58 +188,86 @@ def open_emails_by_subject(subject, count=None, interval=10):
         mail.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
         mail.select("inbox")
         
+        # Sprawdź ile maili o danym temacie jest dostępnych
         _, search_data = mail.search(None, f'SUBJECT "{subject}"')
-        email_ids = search_data[0].split()
+        all_email_ids = search_data[0].split()
         
-        if not email_ids:
+        if not all_email_ids:
             st.warning(f"Nie znaleziono maili o temacie '{subject}'")
             mail.close()
             mail.logout()
             return []
         
-        if count and count < len(email_ids):
-            email_ids = email_ids[:count]
+        total_emails = len(all_email_ids)
+        emails_to_process = min(count or total_emails, total_emails)
         
         processed_emails = []
         processed_count = 0
         error_count = 0
         
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        # Kontenery na wyświetlanie maili (będziemy je odwracać na końcu)
+        email_containers = []
         
-        for i, email_id in enumerate(email_ids):
-            # Aktualizacja paska postępu
-            progress = (i + 1) / len(email_ids)
-            progress_bar.progress(progress)
-            status_text.text(f"Przetwarzanie maila {i+1} z {len(email_ids)}")
+        # Główny kontener na postęp
+        progress_container = st.container()
+        
+        with progress_container:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            status_text.text(f"Rozpoczynam przetwarzanie {emails_to_process} maili...")
             
-            subject, content, delete_success = process_email(email_id, mail)
-            if subject and content:
-                processed_emails.append((subject, content))
-                processed_count += 1
+            for i in range(emails_to_process):
+                # Pobierz pierwszy dostępny mail o podanym temacie
+                # Ważne: Za każdym razem wykonujemy nowe wyszukiwanie
+                email_id = get_first_email_by_subject(mail, subject)
                 
-                # Wyświetl przetworzony email
-                with st.expander(f"Email {i+1}: {subject}", expanded=False):
-                    st.components.v1.html(content, height=400, scrolling=True)
-                    if not delete_success:
-                        st.warning("Email został otwarty, ale nie udało się go usunąć")
-            else:
-                error_count += 1
-                st.error(f"Błąd podczas przetwarzania maila {i+1}")
+                if not email_id:
+                    status_text.text(f"Nie znaleziono więcej maili o temacie '{subject}'")
+                    break
+                
+                # Aktualizacja paska postępu
+                progress = (i + 1) / emails_to_process
+                progress_bar.progress(progress)
+                status_text.text(f"Przetwarzanie maila {i+1} z {emails_to_process}")
+                
+                # Dodaj nowy kontener dla maila (będzie na początku listy)
+                email_container = st.container()
+                email_containers.insert(0, email_container)
+                
+                # Przetwórz mail
+                mail_subject, mail_content, delete_success = process_email(email_id, mail)
+                
+                if mail_subject and mail_content:
+                    processed_emails.append((mail_subject, mail_content))
+                    processed_count += 1
+                    
+                    # Aktualizujemy status przetwarzania
+                    with email_container:
+                        st.subheader(f"Email {i+1}: {mail_subject}")
+                        st.components.v1.html(mail_content, height=400, scrolling=True)
+                        if not delete_success:
+                            st.warning("Email został otwarty, ale nie udało się go usunąć")
+                        st.divider()
+                else:
+                    error_count += 1
+                    with email_container:
+                        st.error(f"Błąd podczas przetwarzania maila {i+1}")
+                        st.divider()
+                
+                # Losowa wartość interwału (±50%)
+                if i < emails_to_process - 1:  # Nie czekaj po ostatnim mailu
+                    random_interval = interval * (0.5 + random.random())
+                    status_text.text(f"Czekam {random_interval:.2f}s przed kolejnym mailem...")
+                    time.sleep(random_interval)
             
-            # Losowa wartość interwału (±50%)
-            if i < len(email_ids) - 1:  # Nie czekaj po ostatnim mailu
-                random_interval = interval * (0.5 + random.random())
-                status_text.text(f"Czekam {random_interval:.2f}s przed kolejnym mailem...")
-                time.sleep(random_interval)
+            # Końcowa informacja o statusie
+            if error_count > 0:
+                status_text.text(f"Zakończono: przetworzono {processed_count} maili, błędy: {error_count}")
+            else:
+                status_text.text(f"Zakończono przetwarzanie {processed_count} maili")
         
         mail.close()
         mail.logout()
-        
-        if error_count > 0:
-            status_text.text(f"Zakończono: przetworzono {processed_count} maili, błędy: {error_count}")
-        else:
-            status_text.text(f"Zakończono przetwarzanie {processed_count} maili")
             
         return processed_emails
     except Exception as e:
