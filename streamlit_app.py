@@ -42,21 +42,103 @@ def decode_content(part):
     return content.decode('utf-8', errors='replace')
 
 def load_image(url):
+    """Ładuje obrazy z lepszymi nagłówkami do symulacji prawdziwej przeglądarki"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+    }
+    
     try:
-        response = requests.get(url, timeout=5)
-        logger.debug(f"Loaded image from {url}")
+        session = requests.Session()
+        session.headers.update(headers)
+        response = session.get(url, timeout=10)
+        response.raise_for_status()
+        logger.debug(f"Loaded image from {url} - Status: {response.status_code}")
         return response.content
     except Exception as e:
         logger.error(f"Failed to load image from {url}: {e}")
         return None
 
-def simulate_link_click(url):
+def simulate_link_click(url, referer=None):
+    """Poprawiona funkcja symulacji kliknięcia w link"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Cache-Control': 'max-age=0',
+    }
+    
+    # Dodaj referer jeśli został podany
+    if referer:
+        headers['Referer'] = referer
+    
     try:
-        response = requests.head(url, allow_redirects=True, timeout=5)
-        logger.debug(f"Simulated click on link {url}")
+        # Użyj sesji do zachowania ciasteczek
+        session = requests.Session()
+        session.headers.update(headers)
+        
+        # Symuluj prawdziwe kliknięcie - użyj GET zamiast HEAD i pobierz treść
+        response = session.get(
+            url, 
+            allow_redirects=True, 
+            timeout=15,
+            stream=False  # Pobierz pełną treść
+        )
+        
+        # Sprawdź czy żądanie było udane
+        response.raise_for_status()
+        
+        # Loguj szczegóły odpowiedzi
+        logger.debug(f"Clicked link {url}")
+        logger.debug(f"Final URL after redirects: {response.url}")
+        logger.debug(f"Status code: {response.status_code}")
+        logger.debug(f"Response headers: {dict(response.headers)}")
+        logger.debug(f"Content length: {len(response.content)} bytes")
+        
+        # Jeśli to strona HTML, spróbuj znaleźć dodatkowe tracking pixele
+        content_type = response.headers.get('content-type', '').lower()
+        if 'text/html' in content_type:
+            try:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # Szukaj dodatkowych obrazów trackingowych
+                tracking_images = soup.find_all('img', {'width': '1', 'height': '1'})
+                tracking_images.extend(soup.find_all('img', style=lambda x: x and 'display:none' in x.replace(' ', '')))
+                
+                for img in tracking_images:
+                    img_src = img.get('src')
+                    if img_src:
+                        img_url = urljoin(response.url, img_src)
+                        try:
+                            img_response = session.get(img_url, timeout=5)
+                            logger.debug(f"Loaded tracking pixel: {img_url}")
+                        except:
+                            pass
+                            
+            except Exception as e:
+                logger.debug(f"Could not parse HTML content for additional tracking: {e}")
+        
+        # Dodaj małe opóźnienie dla symulacji prawdziwego zachowania
+        time.sleep(random.uniform(0.5, 2.0))
+        
         return response.url
+        
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout while clicking link {url}")
+        return url
+    except requests.exceptions.RequestException as e:
+        logger.error(f"HTTP error while clicking link {url}: {e}")
+        return url
     except Exception as e:
-        logger.error(f"Failed to simulate click on {url}: {e}")
+        logger.error(f"Unexpected error while clicking link {url}: {e}")
         return url
 
 def process_html_content(html_content, email_message):
@@ -82,26 +164,44 @@ def process_html_content(html_content, email_message):
                         processed_images += 1
                         break
             else:
-                # Obraz zewnętrzny
-                full_url = urljoin(email_message['From'], src)
+                # Obraz zewnętrzny - ładuj z nagłówkami przeglądarki
+                full_url = urljoin(email_message.get('From', ''), src)
                 img_data = load_image(full_url)
                 if img_data:
+                    # Spróbuj określić typ obrazu na podstawie nagłówków
+                    try:
+                        import imghdr
+                        img_type = imghdr.what(None, h=img_data)
+                        if img_type:
+                            mime_type = f"image/{img_type}"
+                        else:
+                            mime_type = "image/png"  # fallback
+                    except:
+                        mime_type = "image/png"
+                    
                     encoded_image = base64.b64encode(img_data).decode()
-                    img['src'] = f"data:image/png;base64,{encoded_image}"
+                    img['src'] = f"data:{mime_type};base64,{encoded_image}"
                     processed_images += 1
     
-    # Przetwarzanie linków
+    # Przetwarzanie linków z lepszą symulacją kliknięć
+    base_url = email_message.get('From', '')
     for a in soup.find_all('a'):
         href = a.get('href')
         if href:
-            full_url = urljoin(email_message['From'], href)
-            a['href'] = simulate_link_click(full_url)
+            full_url = urljoin(base_url, href)
+            # Przekaż URL bazowy jako referer
+            clicked_url = simulate_link_click(full_url, referer=base_url)
+            a['href'] = clicked_url
             processed_links += 1
+            
+            # Dodaj małe opóźnienie między kliknięciami
+            if processed_links % 3 == 0:  # Co trzeci link
+                time.sleep(random.uniform(0.2, 0.8))
     
     # Dodanie stylów do body
     body = soup.find('body')
     if body:
-        body['style'] = 'max-width: 800px; margin: auto; padding: 20px;'
+        body['style'] = 'max-width: 800px; margin: auto; padding: 20px; font-family: Arial, sans-serif;'
     
     logger.debug(f"Processed {processed_images} images and {processed_links} links")
     return str(soup)
@@ -336,6 +436,14 @@ def main():
                             max_value=60, 
                             value=10,
                             help="Faktyczny interwał będzie losowy w zakresie ±50% podanej wartości")
+        
+        # Dodaj informację o zmianach
+        st.info("🔧 **Ulepszenia w symulacji kliknięć:**\n"
+                "- Użycie pełnych żądań HTTP zamiast tylko nagłówków\n"
+                "- Realistyczne nagłówki przeglądarki\n"
+                "- Obsługa sesji i ciasteczek\n"
+                "- Automatyczne ładowanie dodatkowych tracking pixeli\n"
+                "- Losowe opóźnienia dla naturalnego zachowania")
         
         if st.button("Zacznij otwierać maile"):
             if not connection_status:
