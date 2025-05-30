@@ -357,12 +357,36 @@ def process_email(email_id, mail):
         
         content = ""
         html_content = ""
+        html_parts = []
         
+        # Zbierz wszystkie części HTML i sprawdź które zawierają linki trackingowe
         for part in email_message.walk():
             if part.get_content_type() == "text/plain":
                 content += decode_content(part)
             elif part.get_content_type() == "text/html":
-                html_content += decode_content(part)
+                decoded_html = decode_content(part)
+                html_parts.append({
+                    'content': decoded_html,
+                    'has_leadingmail': 'leadingmail.pl' in decoded_html.lower(),
+                    'leadingmail_count': decoded_html.lower().count('leadingmail.pl')
+                })
+        
+        # Wybierz najlepszą część HTML (z trackingiem jeśli dostępna)
+        if html_parts:
+            # Preferuj części z linkami LeadingMail
+            tracking_parts = [p for p in html_parts if p['has_leadingmail']]
+            
+            if tracking_parts:
+                # Wybierz część z największą liczbą linków trackingowych
+                best_part = max(tracking_parts, key=lambda x: x['leadingmail_count'])
+                html_content = best_part['content']
+                logger.debug(f"Using HTML part with {best_part['leadingmail_count']} LeadingMail links")
+            else:
+                # Jeśli żadna część nie ma linków trackingowych, użyj ostatniej
+                html_content = html_parts[-1]['content']
+                logger.debug("No LeadingMail links found in any HTML part, using last part")
+            
+            logger.debug(f"Total HTML parts found: {len(html_parts)}, parts with tracking: {len(tracking_parts)}")
         
         final_content = process_html_content(html_content, email_message) if html_content else content
         
