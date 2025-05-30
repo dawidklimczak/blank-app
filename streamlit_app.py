@@ -41,6 +41,103 @@ def decode_content(part):
             return content.decode(charset, errors='replace')
     return content.decode('utf-8', errors='replace')
 
+def debug_email_structure(email_id, mail):
+    """Funkcja debugowania - pokazuje surową strukturę maila"""
+    try:
+        _, msg_data = mail.fetch(email_id, '(RFC822)')
+        email_body = msg_data[0][1]
+        email_message = email.message_from_bytes(email_body)
+        
+        subject = decode_header(email_message["Subject"])[0][0]
+        if isinstance(subject, bytes):
+            subject = subject.decode('utf-8', errors='replace')
+        
+        debug_info = {
+            'subject': subject,
+            'raw_size': len(email_body),
+            'headers': dict(email_message.items()),
+            'parts': []
+        }
+        
+        st.subheader(f"Debugowanie maila: {subject}")
+        
+        # Pokaż główne nagłówki
+        st.write("**Główne nagłówki:**")
+        for header, value in email_message.items():
+            st.text(f"{header}: {value}")
+        
+        # Pokaż surową treść (pierwsze 2000 znaków)
+        st.write("**Surowa treść maila (pierwsze 2000 znaków):**")
+        raw_text = email_body.decode('utf-8', errors='replace')
+        st.code(raw_text[:2000], language='text')
+        
+        if len(raw_text) > 2000:
+            st.write(f"... (ukryto {len(raw_text) - 2000} znaków)")
+        
+        # Analizuj wszystkie części
+        st.write("**Analiza części multipart:**")
+        part_num = 0
+        
+        for part in email_message.walk():
+            part_num += 1
+            content_type = part.get_content_type()
+            content_disposition = part.get('Content-Disposition')
+            
+            st.write(f"**Część {part_num}:**")
+            st.write(f"- Content-Type: `{content_type}`")
+            st.write(f"- Content-Disposition: `{content_disposition}`")
+            st.write(f"- Charset: `{part.get_content_charset()}`")
+            
+            # Pokaż nagłówki tej części
+            part_headers = dict(part.items())
+            if part_headers:
+                st.write("- Nagłówki części:")
+                for h_name, h_value in part_headers.items():
+                    st.text(f"  {h_name}: {h_value}")
+            
+            # Spróbuj zdekodować treść
+            if content_type in ['text/plain', 'text/html']:
+                try:
+                    decoded_content = decode_content(part)
+                    
+                    # Szukaj linków leadingmail w treści
+                    leadingmail_links = []
+                    for line in decoded_content.split('\n'):
+                        if 'leadingmail.pl' in line.lower():
+                            leadingmail_links.append(line.strip())
+                    
+                    st.write(f"- Rozmiar treści: {len(decoded_content)} znaków")
+                    
+                    if leadingmail_links:
+                        st.success(f"**ZNALEZIONO {len(leadingmail_links)} linków LeadingMail!**")
+                        for i, link in enumerate(leadingmail_links[:3]):  # Pokaż max 3
+                            st.code(link, language='text')
+                        if len(leadingmail_links) > 3:
+                            st.write(f"... i {len(leadingmail_links) - 3} więcej")
+                    
+                    # Pokaż fragment treści
+                    st.write("- Fragment treści:")
+                    if content_type == 'text/html':
+                        # Pokaż surowy HTML
+                        st.code(decoded_content[:500], language='html')
+                    else:
+                        st.text(decoded_content[:500])
+                    
+                    if len(decoded_content) > 500:
+                        st.write(f"... (ukryto {len(decoded_content) - 500} znaków)")
+                        
+                except Exception as e:
+                    st.error(f"Błąd dekodowania części {part_num}: {e}")
+            
+            st.divider()
+        
+        return debug_info
+        
+    except Exception as e:
+        st.error(f"Błąd podczas debugowania maila: {e}")
+        logger.error(f"Error in debug_email_structure: {e}")
+        return None
+
 def load_image(url):
     """Ładuje obrazy z lepszymi nagłówkami do symulacji prawdziwej przeglądarki"""
     headers = {
@@ -85,12 +182,12 @@ def simulate_link_click(url, referer=None):
         session = requests.Session()
         session.headers.update(headers)
         
-        # Symuluj prawdziwe kliknięcie - użyj GET zamiast HEAD i pobierz treść
+        # Symuluj prawdziwe kliknięcie - użyj GET i pobierz treść
         response = session.get(
             url, 
             allow_redirects=True, 
             timeout=15,
-            stream=False  # Pobierz pełną treść
+            stream=False
         )
         
         # Sprawdź czy żądanie było udane
@@ -183,13 +280,13 @@ def process_html_content(html_content, email_message):
                     img['src'] = f"data:{mime_type};base64,{encoded_image}"
                     processed_images += 1
     
-    # Przetwarzanie linków z lepszą symulacją kliknięć
+    # Przetwarzanie linków - teraz używamy oryginalnych URL-i z maila
     base_url = email_message.get('From', '')
     for a in soup.find_all('a'):
         href = a.get('href')
         if href:
             full_url = urljoin(base_url, href)
-            # Przekaż URL bazowy jako referer
+            # Symuluj kliknięcie w oryginalny link (może już być trackingowy)
             clicked_url = simulate_link_click(full_url, referer=base_url)
             a['href'] = clicked_url
             processed_links += 1
@@ -375,6 +472,31 @@ def open_emails_by_subject(subject, count=None, interval=10):
         logger.error(f"Error in open_emails_by_subject: {e}")
         return []
 
+def debug_single_email(subject):
+    """Funkcja do debugowania pojedynczego maila"""
+    try:
+        mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
+        mail.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
+        mail.select("inbox")
+        
+        email_id = get_first_email_by_subject(mail, subject)
+        if email_id:
+            debug_info = debug_email_structure(email_id, mail)
+            return debug_info
+        else:
+            st.warning(f"Nie znaleziono maila o temacie '{subject}'")
+            return None
+            
+    except Exception as e:
+        st.error(f"Błąd podczas debugowania: {e}")
+        return None
+    finally:
+        try:
+            mail.close()
+            mail.logout()
+        except:
+            pass
+
 def check_imap_connection():
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
@@ -398,21 +520,34 @@ def main():
     
     subject_to_search = st.text_input("Podaj temat maila")
     
-    if st.button("Sprawdź liczbę maili"):
-        if not subject_to_search:
-            st.error("Podaj temat maila")
-            return
+    # Dodaj przycisk do debugowania
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("Sprawdź liczbę maili"):
+            if not subject_to_search:
+                st.error("Podaj temat maila")
+                return
+                
+            with st.spinner("Sprawdzanie liczby maili..."):
+                email_count = count_emails_by_subject(subject_to_search)
+                
+            st.session_state['email_count'] = email_count
+            st.session_state['subject'] = subject_to_search
             
-        with st.spinner("Sprawdzanie liczby maili..."):
-            email_count = count_emails_by_subject(subject_to_search)
-            
-        st.session_state['email_count'] = email_count
-        st.session_state['subject'] = subject_to_search
-        
-        if email_count > 0:
-            st.success(f"Znaleziono {email_count} maili o temacie '{subject_to_search}'")
-        else:
-            st.warning(f"Nie znaleziono maili o temacie '{subject_to_search}'")
+            if email_count > 0:
+                st.success(f"Znaleziono {email_count} maili o temacie '{subject_to_search}'")
+            else:
+                st.warning(f"Nie znaleziono maili o temacie '{subject_to_search}'")
+    
+    with col2:
+        if st.button("Debuguj strukturę maila"):
+            if not subject_to_search:
+                st.error("Podaj temat maila")
+                return
+                
+            with st.spinner("Analizowanie struktury maila..."):
+                debug_single_email(subject_to_search)
     
     if 'email_count' in st.session_state and st.session_state['email_count'] > 0:
         st.subheader("Ustawienia otwierania")
@@ -436,14 +571,6 @@ def main():
                             max_value=60, 
                             value=10,
                             help="Faktyczny interwał będzie losowy w zakresie ±50% podanej wartości")
-        
-        # Dodaj informację o zmianach
-        st.info("🔧 **Ulepszenia w symulacji kliknięć:**\n"
-                "- Użycie pełnych żądań HTTP zamiast tylko nagłówków\n"
-                "- Realistyczne nagłówki przeglądarki\n"
-                "- Obsługa sesji i ciasteczek\n"
-                "- Automatyczne ładowanie dodatkowych tracking pixeli\n"
-                "- Losowe opóźnienia dla naturalnego zachowania")
         
         if st.button("Zacznij otwierać maile"):
             if not connection_status:
