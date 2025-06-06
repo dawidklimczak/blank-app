@@ -239,12 +239,12 @@ def simulate_link_click(url, referer=None):
         return url
 
 def process_html_content(html_content, email_message, should_click_links=True):
-    """Przetwarzanie treści HTML z opcjonalnym klikaniem linków"""
+    """Przetwarzanie treści HTML z opcjonalnym klikaniem jednego losowego linku"""
     soup = BeautifulSoup(html_content, 'html.parser')
     
     # Liczniki do śledzenia ilości przetworzonych elementów
     processed_images = 0
-    processed_links = 0
+    clicked_links = 0
     
     # Przetwarzanie obrazów (zawsze)
     for img in soup.find_all('img'):
@@ -281,23 +281,33 @@ def process_html_content(html_content, email_message, should_click_links=True):
                     img['src'] = f"data:{mime_type};base64,{encoded_image}"
                     processed_images += 1
     
-    # Przetwarzanie linków - tylko jeśli should_click_links=True
+    # Przetwarzanie linków - kliknij w jeden losowy link jeśli should_click_links=True
     if should_click_links:
         base_url = email_message.get('From', '')
-        for a in soup.find_all('a'):
-            href = a.get('href')
-            if href:
-                full_url = urljoin(base_url, href)
-                # Symuluj kliknięcie w oryginalny link (może już być trackingowy)
-                clicked_url = simulate_link_click(full_url, referer=base_url)
-                a['href'] = clicked_url
-                processed_links += 1
-                
-                # Dodaj małe opóźnienie między kliknięciami
-                if processed_links % 3 == 0:  # Co trzeci link
-                    time.sleep(random.uniform(0.2, 0.8))
+        all_links = soup.find_all('a')
         
-        logger.debug(f"Processed {processed_images} images and clicked {processed_links} links")
+        # Filtruj linki które mają href
+        valid_links = [a for a in all_links if a.get('href')]
+        
+        if valid_links:
+            # Weź pierwsze 10 linków (lub mniej jeśli jest mniej dostępnych)
+            links_to_choose_from = valid_links[:10]
+            
+            # Wylosuj jeden link
+            chosen_link = random.choice(links_to_choose_from)
+            href = chosen_link.get('href')
+            
+            full_url = urljoin(base_url, href)
+            # Symuluj kliknięcie w wylosowany link
+            clicked_url = simulate_link_click(full_url, referer=base_url)
+            chosen_link['href'] = clicked_url
+            clicked_links = 1
+            
+            logger.debug(f"Clicked random link: {href} (chosen from {len(links_to_choose_from)} available links)")
+        else:
+            logger.debug("No valid links found to click")
+        
+        logger.debug(f"Processed {processed_images} images and clicked {clicked_links} link")
     else:
         logger.debug(f"Processed {processed_images} images, links not clicked")
     
@@ -306,7 +316,7 @@ def process_html_content(html_content, email_message, should_click_links=True):
     if body:
         body['style'] = 'max-width: 800px; margin: auto; padding: 20px; font-family: Arial, sans-serif;'
     
-    return str(soup), processed_links
+    return str(soup), clicked_links
 
 def delete_email(mail, email_id):
     try:
@@ -493,9 +503,9 @@ def open_emails_by_subject(subject, count=None, interval=10, click_percentage=10
                     
                     # Aktualizujemy wyświetlanie maila
                     with email_container:
-                        # Dodaj wskaźnik czy linki zostały kliknięte
+                        # Dodaj wskaźnik czy link został kliknięty
                         if should_click and links_clicked > 0:
-                            st.subheader(f"Email {i+1}: {mail_subject} ✅ Kliknięto {links_clicked} linków")
+                            st.subheader(f"Email {i+1}: {mail_subject} ✅ Kliknięto losowy link")
                         elif should_click and links_clicked == 0:
                             st.subheader(f"Email {i+1}: {mail_subject} ⚠️ Planowano kliknięcie, ale nie znaleziono linków")
                         else:
