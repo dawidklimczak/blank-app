@@ -238,14 +238,15 @@ def simulate_link_click(url, referer=None):
         logger.error(f"Unexpected error while clicking link {url}: {e}")
         return url
 
-def process_html_content(html_content, email_message):
+def process_html_content(html_content, email_message, should_click_links=True):
+    """Przetwarzanie treści HTML z opcjonalnym klikaniem linków"""
     soup = BeautifulSoup(html_content, 'html.parser')
     
     # Liczniki do śledzenia ilości przetworzonych elementów
     processed_images = 0
     processed_links = 0
     
-    # Przetwarzanie obrazów
+    # Przetwarzanie obrazów (zawsze)
     for img in soup.find_all('img'):
         src = img.get('src')
         if src:
@@ -280,28 +281,32 @@ def process_html_content(html_content, email_message):
                     img['src'] = f"data:{mime_type};base64,{encoded_image}"
                     processed_images += 1
     
-    # Przetwarzanie linków - teraz używamy oryginalnych URL-i z maila
-    base_url = email_message.get('From', '')
-    for a in soup.find_all('a'):
-        href = a.get('href')
-        if href:
-            full_url = urljoin(base_url, href)
-            # Symuluj kliknięcie w oryginalny link (może już być trackingowy)
-            clicked_url = simulate_link_click(full_url, referer=base_url)
-            a['href'] = clicked_url
-            processed_links += 1
-            
-            # Dodaj małe opóźnienie między kliknięciami
-            if processed_links % 3 == 0:  # Co trzeci link
-                time.sleep(random.uniform(0.2, 0.8))
+    # Przetwarzanie linków - tylko jeśli should_click_links=True
+    if should_click_links:
+        base_url = email_message.get('From', '')
+        for a in soup.find_all('a'):
+            href = a.get('href')
+            if href:
+                full_url = urljoin(base_url, href)
+                # Symuluj kliknięcie w oryginalny link (może już być trackingowy)
+                clicked_url = simulate_link_click(full_url, referer=base_url)
+                a['href'] = clicked_url
+                processed_links += 1
+                
+                # Dodaj małe opóźnienie między kliknięciami
+                if processed_links % 3 == 0:  # Co trzeci link
+                    time.sleep(random.uniform(0.2, 0.8))
+        
+        logger.debug(f"Processed {processed_images} images and clicked {processed_links} links")
+    else:
+        logger.debug(f"Processed {processed_images} images, links not clicked")
     
     # Dodanie stylów do body
     body = soup.find('body')
     if body:
         body['style'] = 'max-width: 800px; margin: auto; padding: 20px; font-family: Arial, sans-serif;'
     
-    logger.debug(f"Processed {processed_images} images and {processed_links} links")
-    return str(soup)
+    return str(soup), processed_links
 
 def delete_email(mail, email_id):
     try:
@@ -343,7 +348,8 @@ def get_first_email_by_subject(mail, subject):
         logger.error(f"Error searching emails: {e}")
         return None
 
-def process_email(email_id, mail):
+def process_email(email_id, mail, should_click_links=True):
+    """Przetwarzanie pojedynczego maila z opcjonalnym klikaniem linków"""
     try:
         _, msg_data = mail.fetch(email_id, '(RFC822)')
         email_body = msg_data[0][1]
@@ -353,7 +359,7 @@ def process_email(email_id, mail):
         if isinstance(subject, bytes):
             subject = subject.decode('utf-8', errors='replace')
         
-        logger.debug(f"Processing email with subject: {subject}")
+        logger.debug(f"Processing email with subject: {subject}, click_links: {should_click_links}")
         
         content = ""
         html_content = ""
@@ -372,6 +378,7 @@ def process_email(email_id, mail):
                 })
         
         # Wybierz najlepszą część HTML (z trackingiem jeśli dostępna)
+        links_clicked = 0
         if html_parts:
             # Preferuj części z linkami LeadingMail
             tracking_parts = [p for p in html_parts if p['has_leadingmail']]
@@ -388,7 +395,11 @@ def process_email(email_id, mail):
             
             logger.debug(f"Total HTML parts found: {len(html_parts)}, parts with tracking: {len(tracking_parts)}")
         
-        final_content = process_html_content(html_content, email_message) if html_content else content
+        if html_content:
+            final_content, links_clicked = process_html_content(html_content, email_message, should_click_links)
+        else:
+            final_content = content
+            links_clicked = 0
         
         # Usuń wiadomość po przetworzeniu
         delete_success = delete_email(mail, email_id)
@@ -398,12 +409,13 @@ def process_email(email_id, mail):
         else:
             logger.warning(f"Email processed but deletion failed")
             
-        return subject, final_content, delete_success
+        return subject, final_content, delete_success, links_clicked
     except Exception as e:
         logger.error(f"Error processing email: {e}")
-        return None, None, False
+        return None, None, False, 0
 
-def open_emails_by_subject(subject, count=None, interval=10):
+def open_emails_by_subject(subject, count=None, interval=10, click_percentage=100):
+    """Otwieranie maili z kontrolą procentu klikanych linków"""
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
         mail.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
@@ -422,9 +434,17 @@ def open_emails_by_subject(subject, count=None, interval=10):
         total_emails = len(all_email_ids)
         emails_to_process = min(count or total_emails, total_emails)
         
+        # Wylosuj które maile będą miały kliknięte linki
+        emails_to_click = int(emails_to_process * click_percentage / 100)
+        click_indices = set(random.sample(range(emails_to_process), emails_to_click))
+        
+        logger.debug(f"Will click links in {emails_to_click} out of {emails_to_process} emails")
+        logger.debug(f"Click indices: {sorted(click_indices)}")
+        
         processed_emails = []
         processed_count = 0
         error_count = 0
+        total_links_clicked = 0
         
         # Kontenery na wyświetlanie maili (będziemy je odwracać na końcu)
         email_containers = []
@@ -435,11 +455,18 @@ def open_emails_by_subject(subject, count=None, interval=10):
         with progress_container:
             progress_bar = st.progress(0)
             status_text = st.empty()
-            status_text.text(f"Rozpoczynam przetwarzanie {emails_to_process} maili...")
+            
+            # Pokaż informację o ustawieniach klikania
+            if click_percentage < 100:
+                status_text.text(f"Rozpoczynam przetwarzanie {emails_to_process} maili (linki kliknięte w {emails_to_click} mailach, {click_percentage}%)")
+            else:
+                status_text.text(f"Rozpoczynam przetwarzanie {emails_to_process} maili (linki kliknięte we wszystkich)")
             
             for i in range(emails_to_process):
+                # Sprawdź czy w tym mailu mają być kliknięte linki
+                should_click = i in click_indices
+                
                 # Pobierz pierwszy dostępny mail o podanym temacie
-                # Ważne: Za każdym razem wykonujemy nowe wyszukiwanie
                 email_id = get_first_email_by_subject(mail, subject)
                 
                 if not email_id:
@@ -449,22 +476,31 @@ def open_emails_by_subject(subject, count=None, interval=10):
                 # Aktualizacja paska postępu
                 progress = (i + 1) / emails_to_process
                 progress_bar.progress(progress)
-                status_text.text(f"Przetwarzanie maila {i+1} z {emails_to_process}")
+                action_text = "z klikaniem linków" if should_click else "bez klikania linków"
+                status_text.text(f"Przetwarzanie maila {i+1} z {emails_to_process} ({action_text})")
                 
                 # Dodaj nowy kontener dla maila (będzie na początku listy)
                 email_container = st.container()
                 email_containers.insert(0, email_container)
                 
                 # Przetwórz mail
-                mail_subject, mail_content, delete_success = process_email(email_id, mail)
+                mail_subject, mail_content, delete_success, links_clicked = process_email(email_id, mail, should_click)
                 
                 if mail_subject and mail_content:
                     processed_emails.append((mail_subject, mail_content))
                     processed_count += 1
+                    total_links_clicked += links_clicked
                     
-                    # Aktualizujemy status przetwarzania
+                    # Aktualizujemy wyświetlanie maila
                     with email_container:
-                        st.subheader(f"Email {i+1}: {mail_subject}")
+                        # Dodaj wskaźnik czy linki zostały kliknięte
+                        if should_click and links_clicked > 0:
+                            st.subheader(f"Email {i+1}: {mail_subject} ✅ Kliknięto {links_clicked} linków")
+                        elif should_click and links_clicked == 0:
+                            st.subheader(f"Email {i+1}: {mail_subject} ⚠️ Planowano kliknięcie, ale nie znaleziono linków")
+                        else:
+                            st.subheader(f"Email {i+1}: {mail_subject} 📧 Tylko otwarty")
+                        
                         st.components.v1.html(mail_content, height=400, scrolling=True)
                         if not delete_success:
                             st.warning("Email został otwarty, ale nie udało się go usunąć")
@@ -483,9 +519,9 @@ def open_emails_by_subject(subject, count=None, interval=10):
             
             # Końcowa informacja o statusie
             if error_count > 0:
-                status_text.text(f"Zakończono: przetworzono {processed_count} maili, błędy: {error_count}")
+                status_text.text(f"Zakończono: przetworzono {processed_count} maili, błędy: {error_count}, kliknięto linki łącznie: {total_links_clicked}")
             else:
-                status_text.text(f"Zakończono przetwarzanie {processed_count} maili")
+                status_text.text(f"Zakończono przetwarzanie {processed_count} maili, kliknięto linki łącznie: {total_links_clicked}")
         
         mail.close()
         mail.logout()
@@ -590,6 +626,20 @@ def main():
             else:
                 email_count_to_open = st.session_state['email_count']
         
+        # Nowe ustawienie procentu klikanych maili
+        click_percentage = st.slider(
+            "Procent maili z klikniętymi linkami", 
+            min_value=0, 
+            max_value=100, 
+            value=100,
+            help="Wybierz jaki procent otwieranych maili ma mieć również kliknięte linki. Maile będą wybierane losowo."
+        )
+        
+        # Pokaż ile maili będzie miało kliknięte linki
+        emails_to_click = int(email_count_to_open * click_percentage / 100)
+        if click_percentage < 100:
+            st.info(f"Z {email_count_to_open} maili, linki zostaną kliknięte w {emails_to_click} mailach (wybrane losowo)")
+        
         interval = st.slider("Interwał między otwieraniem maili (sekundy)", 
                             min_value=1, 
                             max_value=60, 
@@ -605,7 +655,8 @@ def main():
                 open_emails_by_subject(
                     st.session_state['subject'], 
                     count=email_count_to_open if open_all == "Tylko część" else None,
-                    interval=interval
+                    interval=interval,
+                    click_percentage=click_percentage
                 )
     
     # Wyświetlanie logów debugowania
